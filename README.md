@@ -1,134 +1,109 @@
 # EagleFlow
 
-A Swift package that integrates with the Model Context Protocol (MCP) to provide AI workflow management.
+Ein MCP-Server zur Bereitstellung von PDF-Dokumenten für Claude und andere MCP-fähige KI-Assistenten.
 
-## Overview
+## Funktionen
 
-EagleFlow is a convenience wrapper around the MCP Swift SDK that simplifies working with AI models through the standardized Model Context Protocol. It provides an easy-to-use API for connecting to MCP servers, calling tools, and working with resources and prompts.
+- Bereitstellung lokaler PDF-Dokumente über das Model Context Protocol (MCP)
+- Kompatibel mit Claude Desktop und anderen MCP-Clients
+- Einfache Bedienung über GUI oder Kommandozeile
+- Unterstützt macOS, iOS, tvOS, watchOS und visionOS
 
-## Project Structure
+## Installation
 
-This project contains three main components:
+### Als Entwickler
 
-1. **EagleFlow**: The core library that wraps the MCP Swift SDK
-2. **EagleFlowUtils**: Utility functions for formatting output and managing connections
-3. **EagleFlowCLI**: A command-line interface for interacting with MCP servers
+1. Repository klonen:
+   ```bash
+   git clone https://github.com/yourusername/EagleFlow.git
+   cd EagleFlow
+   ```
 
-## Requirements
+2. Abhängigkeiten installieren und kompilieren:
+   ```bash
+   swift build
+   ```
 
-- Swift 6.0+ (Xcode 16+)
-- Platforms: macOS 13.0+, iOS 16.0+, tvOS 16.0+, watchOS 9.0+, visionOS 1.0+
+3. Ausführen:
+   ```bash
+   swift run EagleFlowCLI serve --document-dir ~/Documents
+   ```
 
-## Getting Started
+## CLI-Verwendung
 
-### Opening in Xcode
-
-You can open the project in Xcode by running:
-
-```bash
-./open_in_xcode.sh
-```
-
-Or by directly opening the Package.swift file in Xcode.
-
-### Building from Command Line
-
-```bash
-swift build
-```
-
-This will build all targets, including the EagleFlowCLI executable.
-
-### Running the CLI
+### Server starten
 
 ```bash
-.build/debug/EagleFlowCLI list-tools
-.build/debug/EagleFlowCLI list-prompts
-.build/debug/EagleFlowCLI call-tool <tool-name>
+# Grundlegende Verwendung
+swift run EagleFlowCLI serve
+
+# Mit Verzeichnis-Scan
+swift run EagleFlowCLI serve --document-dir ~/Documents
+
+# Mit spezifischen PDF-Dateien
+swift run EagleFlowCLI serve document1.pdf document2.pdf
+
+# Mit angepasstem Port und Host
+swift run EagleFlowCLI serve -p 3000 -h 0.0.0.0 --document-dir ~/Documents
+
+# Mit automatischer Portsuche, falls Port belegt ist
+swift run EagleFlowCLI serve -a --document-dir ~/Documents
+
+# Mit ausführlicher Protokollierung
+swift run EagleFlowCLI serve -v --document-dir ~/Documents
 ```
 
-## Installation in Your Project
+### Parameter
 
-### Swift Package Manager
+- `-p, --port <port>`: Port, auf dem der Server laufen soll (Standard: 8080)
+- `-h, --host <host>`: Hostname, unter dem der Server erreichbar sein soll (Standard: localhost)
+- `--document-dir <path>`: Verzeichnis, das nach PDF-Dokumenten gescannt werden soll
+- `--path <path>`: Pfad zum SSE-Endpunkt (Standard: /sse)
+- `-a, --auto-port`: Automatisch einen freien Port suchen, falls der angegebene belegt ist
+- `-d, --detach`: Server als Hintergrundprozess starten
+- `-v, --verbose`: Ausführliche Protokollierung aktivieren
 
-Add the following to your `Package.swift` file:
+## GUI-Anwendung
 
-```swift
-dependencies: [
-    .package(url: "https://github.com/yourusername/EagleFlow.git", from: "1.0.0")
-]
+EagleFlow bietet auch eine grafische Benutzeroberfläche (GUI), die den Umgang mit PDF-Dokumenten erleichtert:
+
+```bash
+swift run EagleFlowGUI
 ```
 
-Then add the dependency to your target:
+Mit der GUI können Sie:
+- PDF-Dokumente per Drag & Drop hinzufügen
+- Verzeichnisse nach PDFs scannen
+- Den Server mit einem Klick starten und stoppen
+- Die Claude Desktop Konfiguration kopieren
 
-```swift
-.target(
-    name: "YourTarget",
-    dependencies: [
-        .product(name: "EagleFlow", package: "EagleFlow")
-    ]
-)
-```
+## Claude Desktop Integration
 
-## Library Usage
+Um EagleFlow mit Claude Desktop zu verwenden, fügen Sie folgende Konfiguration in die Claude Desktop Einstellungen ein:
 
-```swift
-import EagleFlow
-import MCP
-
-// Initialize EagleFlow
-let eagleFlow = EagleFlow(name: "MyApp", version: "1.0.0")
-
-// Create a transport and connect
-let transport = StdioTransport()
-let result = try await eagleFlow.connect(transport: transport)
-
-// Check server capabilities
-if result.capabilities.tools != nil {
-    // Server supports tools
-    let tools = try await eagleFlow.listTools()
-    print("Available tools: \(tools.map { $0.name }.joined(separator: ", "))")
-
-    // Call a tool
-    let (content, isError) = try await eagleFlow.callTool(
-        name: "example-tool",
-        arguments: ["param": "value"]
-    )
-
-    // Process tool results
-    for item in content {
-        switch item {
-        case .text(let text):
-            print("Text response: \(text)")
-        case .image(let data, let mimeType, _):
-            print("Received image of type \(mimeType)")
-        // Handle other content types...
-        }
+```json
+{
+  "mcpServers": {
+    "documentServer": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "http://localhost:8080/sse"
+      ]
     }
+  }
 }
-
-// Disconnect when done
-await eagleFlow.disconnect()
 ```
 
-## Utilities Usage
+## Entwicklung
 
-```swift
-import EagleFlowUtils
-import EagleFlow
-import MCP
+EagleFlow verwendet die folgenden Hauptkomponenten:
 
-// Create a connection manager
-let manager = ConnectionManager()
+- **EagleFlowServer**: Der MCP-Server, der PDF-Dokumente als Ressourcen bereitstellt
+- **HTTPServerTransport**: Der HTTP-Server mit SSE-Unterstützung für MCP-Kommunikation
+- **EagleFlowCLI**: Die Kommandozeilen-Schnittstelle
+- **EagleFlowGUI**: Die grafische Benutzeroberfläche
 
-// Create and store a connection
-let eagleFlow = manager.createConnection(id: "primary")
+## Lizenz
 
-// Format tool content for display
-let formattedContent = ContentFormatter.formatContent(toolContent)
-print(formattedContent)
-```
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE.txt](LICENSE.txt) file for details.
+MIT Lizenz

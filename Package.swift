@@ -1,5 +1,4 @@
 // swift-tools-version:6.0
-// The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
@@ -13,7 +12,6 @@ let package = Package(
         .visionOS(.v1)
     ],
     products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "EagleFlow",
             targets: ["EagleFlow"]),
@@ -22,19 +20,31 @@ let package = Package(
             targets: ["EagleFlowUtils"]),
         .executable(
             name: "EagleFlowCLI",
-            targets: ["EagleFlowCLI"])
+            targets: ["EagleFlowCLI"]),
+        .executable(
+            name: "EagleFlowGUI", 
+            targets: ["EagleFlowGUI"])
     ],
     dependencies: [
-        // Dependencies declare other packages that this package depends on.
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.8.2"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.42.0"),
+        .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.18.0"),
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.3.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.4.2"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.1.0"),
+        .package(url: "https://github.com/apple/swift-signal-handling.git", from: "1.0.0")
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "EagleFlow",
             dependencies: [
-                .product(name: "MCP", package: "swift-sdk")
+                .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                .product(name: "NIOExtras", package: "swift-nio-extras"),
+                .product(name: "Logging", package: "swift-log")
             ]),
         .target(
             name: "EagleFlowUtils",
@@ -43,6 +53,15 @@ let package = Package(
             ]),
         .executableTarget(
             name: "EagleFlowCLI",
+            dependencies: [
+                "EagleFlow",
+                "EagleFlowUtils",
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Signals", package: "swift-signal-handling")
+            ]),
+        .executableTarget(
+            name: "EagleFlowGUI",
             dependencies: [
                 "EagleFlow",
                 "EagleFlowUtils"
