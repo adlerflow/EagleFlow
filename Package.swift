@@ -31,8 +31,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.18.0"),
         .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.3.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.4.2"),
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.1.0"),
-        .package(url: "https://github.com/apple/swift-signal-handling.git", from: "1.0.0")
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.1.0")
+        // swift-signal-handling wurde entfernt, da es Probleme verursacht
     ],
     targets: [
         .target(
@@ -49,7 +49,8 @@ let package = Package(
         .target(
             name: "EagleFlowUtils",
             dependencies: [
-                "EagleFlow"
+                "EagleFlow",
+                .product(name: "Logging", package: "swift-log")
             ]),
         .executableTarget(
             name: "EagleFlowCLI",
@@ -57,8 +58,7 @@ let package = Package(
                 "EagleFlow",
                 "EagleFlowUtils",
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                .product(name: "Signals", package: "swift-signal-handling")
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]),
         .executableTarget(
             name: "EagleFlowGUI",

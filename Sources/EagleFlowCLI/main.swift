@@ -4,7 +4,6 @@ import EagleFlow
 import EagleFlowUtils
 import Logging
 import ServiceLifecycle
-import Signals
 
 @main
 struct EagleFlowCommand: ParsableCommand {
@@ -155,14 +154,12 @@ extension EagleFlowCommand {
                 print(EagleFlowUtils.formatConsoleMessage("Drücke CTRL+C zum Beenden.", type: .info))
                 
                 // Signal-Handler einrichten
-                for signal in [SIGINT, SIGTERM] {
-                    signal.trap { _ in
-                        print(EagleFlowUtils.formatConsoleMessage("\nServer wird beendet...", type: .info))
-                        Task {
-                            await server.stop()
-                            print(EagleFlowUtils.formatConsoleMessage("Server wurde beendet.", type: .success))
-                            Foundation.exit(0)
-                        }
+                SignalHandling.setupSignalHandlers {
+                    print(EagleFlowUtils.formatConsoleMessage("\nServer wird beendet...", type: .info))
+                    Task {
+                        await server.stop()
+                        print(EagleFlowUtils.formatConsoleMessage("Server wurde beendet.", type: .success))
+                        Foundation.exit(0)
                     }
                 }
                 

@@ -17,7 +17,9 @@ public class HTTPServerTransport: Transport {
     private var channel: Channel?
     private var isStarted = false
     
-    private let messageContinuations = ContinuationStore<Data>()
+    private let messageQueue = AsyncQueue<Data>()
+    private var connections: [ObjectIdentifier: SSEConnection] = [:]
+    private let connectionLock = NSLock()
     
     /// Initialisiere einen neuen HTTP-Server-Transport
     /// - Parameters:
@@ -29,7 +31,7 @@ public class HTTPServerTransport: Transport {
         self.host = host
         self.port = port
         self.path = path
-        self.logger = logger ?? Logger(label: "com.eagleflow.http-server-transport")
+        self.logger = logger ?? Logger(label: "com.eagleflow.http-transport")
     }
     
     public func connect() async throws {
@@ -47,14 +49,22 @@ public class HTTPServerTransport: Transport {
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelInitializer { channel in
-                let handler = HTTPHandler(messageContinuations: self.messageContinuations, path: self.path, logger: self.logger)
+            .childChannelInitializer { [weak self] channel in
+                guard let self = self else {
+                    return channel.eventLoop.makeFailedFuture(TransportError.notConnected)
+                }
+                
+                let handler = HTTPHandler(
+                    path: self.path,
+                    onNewConnection: { [weak self] in self?.handleNewConnection($0) },
+                    logger: self.logger
+                )
+                
                 return channel.pipeline.configureHTTPServerPipeline().flatMap {
                     channel.pipeline.addHandler(handler)
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 16)
             .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
         
         // Server starten
@@ -73,6 +83,15 @@ public class HTTPServerTransport: Transport {
     public func disconnect() async {
         logger.info("Stoppe HTTP-Server")
         
+        // Verbindungen schließen
+        connectionLock.lock()
+        for (_, connection) in connections {
+            connection.close()
+        }
+        connections.removeAll()
+        connectionLock.unlock()
+        
+        // Channel und EventLoop-Gruppe beenden
         if let channel = channel {
             try? await channel.close().get()
             self.channel = nil
@@ -83,9 +102,7 @@ public class HTTPServerTransport: Transport {
             self.group = nil
         }
         
-        messageContinuations.cancelAll(with: CancellationError())
         isStarted = false
-        
         logger.info("HTTP-Server gestoppt")
     }
     
@@ -95,16 +112,52 @@ public class HTTPServerTransport: Transport {
         }
         
         logger.debug("Sende Nachricht an verbundene Clients (\(data.count) Bytes)")
-        messageContinuations.yield(data, to: .all)
+        
+        connectionLock.lock()
+        let currentConnections = connections
+        connectionLock.unlock()
+        
+        guard !currentConnections.isEmpty else {
+            logger.warning("Keine aktiven Verbindungen zum Senden")
+            return
+        }
+        
+        for (_, connection) in currentConnections {
+            connection.send(data)
+        }
     }
     
     public func receive() -> AsyncThrowingStream<Data, Error> {
-        return AsyncThrowingStream { continuation in
-            let id = messageContinuations.register(continuation)
-            continuation.onTermination = { [weak self] _ in
-                self?.messageContinuations.remove(id)
+        return messageQueue.stream()
+    }
+    
+    // Neue SSE-Verbindung verarbeiten
+    private func handleNewConnection(_ connection: SSEConnection) {
+        let id = ObjectIdentifier(connection)
+        
+        connectionLock.lock()
+        connections[id] = connection
+        connectionLock.unlock()
+        
+        connection.onMessage = { [weak self, weak connection] data in
+            guard let self = self else { return }
+            
+            Task {
+                await self.messageQueue.add(data)
             }
         }
+        
+        connection.onClose = { [weak self] in
+            guard let self = self else { return }
+            
+            self.connectionLock.lock()
+            self.connections.removeValue(forKey: id)
+            self.connectionLock.unlock()
+            
+            self.logger.info("SSE-Verbindung geschlossen")
+        }
+        
+        logger.info("Neue SSE-Verbindung registriert")
     }
 }
 
@@ -114,19 +167,96 @@ enum TransportError: Error {
     case invalidMessage
 }
 
-/// HTTP-Handler für NIO, verarbeitet HTTP-Anfragen und managed SSE-Verbindungen
-private final class HTTPHandler: ChannelInboundHandler {
-    public typealias InboundIn = HTTPServerRequestPart
-    public typealias OutboundOut = HTTPServerResponsePart
+// MARK: - HTTP-Implementierung
+
+/// AsyncQueue zum Thread-sicheren Empfangen von Nachrichten
+actor AsyncQueue<T> {
+    private var continuation: AsyncStream<T>.Continuation?
+    private var buffer: [T] = []
     
-    private let messageContinuations: ContinuationStore<Data>
+    func add(_ value: T) {
+        if let continuation = continuation {
+            continuation.yield(value)
+        } else {
+            buffer.append(value)
+        }
+    }
+    
+    func stream() -> AsyncThrowingStream<T, Error> {
+        return AsyncThrowingStream { continuation in
+            Task {
+                self.continuation = AsyncStream<T>.Continuation { 
+                    continuation.finish() 
+                }
+                
+                // Gepufferte Werte ausgeben
+                for value in buffer {
+                    continuation.yield(value)
+                }
+                buffer.removeAll()
+            }
+        }
+    }
+}
+
+/// Vereinfachte SSE-Verbindung
+class SSEConnection {
+    let channel: Channel
+    var onMessage: ((Data) -> Void)?
+    var onClose: (() -> Void)?
+    
+    init(channel: Channel) {
+        self.channel = channel
+        
+        channel.closeFuture.whenComplete { [weak self] _ in
+            self?.onClose?()
+        }
+    }
+    
+    func send(_ data: Data) {
+        var sseData = "data:"
+        
+        // Zeilenumbrüche im JSON berücksichtigen
+        if let dataString = String(data: data, encoding: .utf8) {
+            let lines = dataString.split(separator: "\n")
+            for (i, line) in lines.enumerated() {
+                if i > 0 {
+                    sseData.append("\ndata:")
+                }
+                sseData.append(String(line))
+            }
+        } else {
+            // Wenn String-Konvertierung fehlschlägt, rohe Binärdaten senden
+            sseData.append(data.base64EncodedString())
+        }
+        
+        sseData.append("\n\n") // Wichtig für SSE-Format
+        
+        guard let eventData = sseData.data(using: .utf8) else { return }
+        var buffer = ByteBuffer(data: eventData)
+        
+        let _ = channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buffer)))
+    }
+    
+    func close() {
+        _ = channel.close()
+    }
+}
+
+/// Vereinfachter HTTP-Handler für NIO
+final class HTTPHandler: ChannelInboundHandler {
+    typealias InboundIn = HTTPServerRequestPart
+    typealias OutboundOut = HTTPServerResponsePart
+    
     private let path: String
+    private let onNewConnection: (SSEConnection) -> Void
     private let logger: Logger
-    private var pendingResponse: HTTPResponseStatus?
+    private var pendingConnection: SSEConnection?
+    private var pendingRequestBody: ByteBuffer?
     
-    init(messageContinuations: ContinuationStore<Data>, path: String, logger: Logger) {
-        self.messageContinuations = messageContinuations
+    init(path: String, onNewConnection: @escaping (SSEConnection) -> Void, logger: Logger) {
         self.path = path
+        self.onNewConnection = onNewConnection
         self.logger = logger
     }
     
@@ -135,154 +265,105 @@ private final class HTTPHandler: ChannelInboundHandler {
         
         switch requestPart {
         case .head(let request):
-            logger.debug("Anfrage empfangen: \(request.method) \(request.uri)")
-            
             if request.method == .GET && request.uri == path {
-                // SSE-Anfrage verarbeiten
-                pendingResponse = .ok
-                
-                // SSE-Header senden
-                var headers = HTTPHeaders()
-                headers.add(name: "Content-Type", value: "text/event-stream")
-                headers.add(name: "Cache-Control", value: "no-cache")
-                headers.add(name: "Connection", value: "keep-alive")
-                headers.add(name: "Access-Control-Allow-Origin", value: "*")
-                
-                let responseHead = HTTPResponseHead(version: request.version, status: .ok, headers: headers)
-                context.write(self.wrapOutboundOut(.head(responseHead)), promise: nil)
-                
-                // Neue SSE-Verbindung registrieren
-                registerSSEConnection(context: context)
-            } else if request.method == .OPTIONS {
-                // CORS Preflight-Anfrage beantworten
-                handleOptionsRequest(context: context, request: request)
+                handleSSERequest(context: context, request: request)
             } else if request.method == .POST {
-                // POST-Anfrage für eingehende Nachrichten
-                pendingResponse = .ok
-                handlePostRequest(context: context, request: request)
+                // Hier könnten wir MCP-Nachrichten vom Client verarbeiten
+                pendingRequestBody = ByteBuffer()
+            } else if request.method == .OPTIONS {
+                handleCORSRequest(context: context, request: request)
             } else {
-                // Seiten-HTML für andere Anfragen
+                // Standard-Info-Seite für andere Anfragen
                 handleStaticRequest(context: context, request: request)
             }
             
-        case .body(let byteBuffer):
-            // Body-Daten verarbeiten, falls wir eine POST-Anfrage haben
-            if pendingResponse == .ok && byteBuffer.readableBytes > 0 {
-                let data = byteBuffer.getData(at: 0, length: byteBuffer.readableBytes) ?? Data()
-                messageContinuations.yield(data, to: .all)
+        case .body(let buffer):
+            if var body = pendingRequestBody {
+                body.writeBuffer(&buffer)
+                pendingRequestBody = body
             }
             
         case .end:
-            // Anfrage abschließen, falls nicht SSE
-            if let status = pendingResponse, status != .ok {
-                context.write(self.wrapOutboundOut(.end(nil)), promise: nil)
-                context.flush()
-            } else if pendingResponse == .ok {
-                // POST-Anfrage mit 200 OK abschließen
+            if let connection = pendingConnection {
+                // SSE-Verbindung registrieren
+                onNewConnection(connection)
+                pendingConnection = nil
+                // Bei SSE senden wir kein .end, da die Verbindung offen bleibt
+            } else if let body = pendingRequestBody {
+                // Verarbeite POST-Anfragen (falls wir MCP-Nachrichten vom Client erhalten)
+                pendingRequestBody = nil
+                
+                // Einfache OK-Antwort senden
                 var headers = HTTPHeaders()
                 headers.add(name: "Content-Type", value: "application/json")
                 headers.add(name: "Content-Length", value: "2")
                 
-                let responseHead = HTTPResponseHead(version: .init(major: 1, minor: 1), status: .ok, headers: headers)
-                context.write(self.wrapOutboundOut(.head(responseHead)), promise: nil)
+                let response = HTTPResponseHead(version: .init(major: 1, minor: 1), status: .ok, headers: headers)
+                context.write(self.wrapOutboundOut(.head(response)), promise: nil)
                 
-                var buffer = context.channel.allocator.buffer(capacity: 2)
-                buffer.writeString("{}")
-                context.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+                var responseBuffer = ByteBuffer()
+                responseBuffer.writeString("{}")
+                context.write(self.wrapOutboundOut(.body(.byteBuffer(responseBuffer))), promise: nil)
                 context.write(self.wrapOutboundOut(.end(nil)), promise: nil)
                 context.flush()
+            } else {
+                // Nichts zu tun für andere Anfragen
+                context.flush()
             }
-            pendingResponse = nil
         }
     }
     
-    // Registriert eine neue SSE-Verbindung und richtet die Datenübermittlung ein
-    private func registerSSEConnection(context: ChannelHandlerContext) {
-        logger.info("Neue SSE-Verbindung registriert")
+    private func handleSSERequest(context: ChannelHandlerContext, request: HTTPRequestHead) {
+        // SSE-Header senden
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "text/event-stream")
+        headers.add(name: "Cache-Control", value: "no-cache")
+        headers.add(name: "Connection", value: "keep-alive")
+        headers.add(name: "Access-Control-Allow-Origin", value: "*")
         
-        let clientId = UUID().uuidString
+        let response = HTTPResponseHead(version: request.version, status: .ok, headers: headers)
+        context.write(self.wrapOutboundOut(.head(response)), promise: nil)
+        context.flush()
         
-        // Erstelle einen Task, der Daten vom ContinuationStore empfängt und an den Client sendet
-        let task = Task {
-            for await data in messageContinuations.stream(for: clientId) {
-                guard !Task.isCancelled else { break }
-                
-                // SSE-Event formatieren
-                var sseData = "data:"
-                let dataString = String(data: data, encoding: .utf8) ?? ""
-                let dataLines = dataString.split(separator: "\n")
-                
-                for (i, line) in dataLines.enumerated() {
-                    if i > 0 {
-                        sseData.append("\ndata:")
-                    }
-                    sseData.append(line)
-                }
-                sseData.append("\n\n")
-                
-                guard let eventData = sseData.data(using: .utf8) else {
-                    continue
-                }
-                
-                var buffer = context.channel.allocator.buffer(capacity: eventData.count)
-                buffer.writeBytes(eventData)
-                
-                // Event an den Client senden
-                context.writeAndFlush(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-            }
-        }
-        
-        // Bei Verbindungsabbruch aufräumen
-        context.channel.closeFuture.whenComplete { [weak self] _ in
-            task.cancel()
-            self?.messageContinuations.remove(clientId)
-            self?.logger.info("SSE-Verbindung geschlossen")
-        }
+        // SSE-Verbindung erstellen
+        pendingConnection = SSEConnection(channel: context.channel)
+        logger.info("SSE-Verbindung initialisiert")
     }
     
-    // Behandelt eine OPTIONS-Anfrage für CORS-Preflight
-    private func handleOptionsRequest(context: ChannelHandlerContext, request: HTTPRequestHead) {
-        pendingResponse = .noContent
-        
+    private func handleCORSRequest(context: ChannelHandlerContext, request: HTTPRequestHead) {
         var headers = HTTPHeaders()
         headers.add(name: "Access-Control-Allow-Origin", value: "*")
         headers.add(name: "Access-Control-Allow-Methods", value: "GET, POST, OPTIONS")
         headers.add(name: "Access-Control-Allow-Headers", value: "Content-Type")
         headers.add(name: "Access-Control-Max-Age", value: "86400")
         
-        let responseHead = HTTPResponseHead(version: request.version, status: .noContent, headers: headers)
-        context.write(self.wrapOutboundOut(.head(responseHead)), promise: nil)
+        let response = HTTPResponseHead(version: request.version, status: .noContent, headers: headers)
+        context.write(self.wrapOutboundOut(.head(response)), promise: nil)
+        context.write(self.wrapOutboundOut(.end(nil)), promise: nil)
+        context.flush()
     }
     
-    // Behandelt eine POST-Anfrage (MCP-Nachricht)
-    private func handlePostRequest(context: ChannelHandlerContext, request: HTTPRequestHead) {
-        // POST wird im body case verarbeitet
-    }
-    
-    // Sendet eine einfache HTML-Seite für andere Anfragen
     private func handleStaticRequest(context: ChannelHandlerContext, request: HTTPRequestHead) {
-        pendingResponse = .ok
-        
-        let responseHTML = """
+        let html = """
         <!DOCTYPE html>
         <html>
         <head>
+            <title>EagleFlow MCP Server</title>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>EagleFlow MCP Server</title>
             <style>
-                body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; }
+                body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; }
                 h1 { color: #333; }
-                .info { background-color: #f0f0f0; padding: 15px; border-radius: 5px; margin: 20px 0; }
-                .endpoint { font-family: monospace; background-color: #e0e0e0; padding: 5px; border-radius: 3px; }
+                .info { background-color: #f5f5f7; border-radius: 10px; padding: 20px; margin: 20px 0; }
+                code { font-family: Menlo, Monaco, monospace; background-color: #eaeaea; padding: 2px 4px; border-radius: 3px; }
             </style>
         </head>
         <body>
             <h1>EagleFlow MCP Server</h1>
             <div class="info">
-                <p>Dieser Server stellt PDF-Dokumente als MCP-Ressourcen bereit.</p>
-                <p>MCP-SSE-Endpunkt: <span class="endpoint">\(path)</span></p>
-                <p>Verbinde dich mit einem MCP-Client wie Claude Desktop, um auf die PDFs zuzugreifen.</p>
+                <p>Dieser Server stellt PDF-Dokumente über das Model Context Protocol (MCP) bereit.</p>
+                <p>MCP-Endpunkt: <code>\(path)</code></p>
+                <p>Verbinde dich mit einem MCP-Client wie Claude Desktop, um auf die Dokumente zuzugreifen.</p>
             </div>
         </body>
         </html>
@@ -290,102 +371,24 @@ private final class HTTPHandler: ChannelInboundHandler {
         
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/html; charset=UTF-8")
-        headers.add(name: "Content-Length", value: "\(responseHTML.utf8.count)")
-        headers.add(name: "Connection", value: "close")
+        headers.add(name: "Content-Length", value: "\(html.utf8.count)")
         
-        let responseHead = HTTPResponseHead(version: request.version, status: .ok, headers: headers)
-        context.write(self.wrapOutboundOut(.head(responseHead)), promise: nil)
+        let response = HTTPResponseHead(version: request.version, status: .ok, headers: headers)
+        context.write(self.wrapOutboundOut(.head(response)), promise: nil)
         
-        var buffer = context.channel.allocator.buffer(capacity: responseHTML.utf8.count)
-        buffer.writeString(responseHTML)
+        var buffer = ByteBuffer()
+        buffer.writeString(html)
         context.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-    }
-}
-
-/// Store für asynchrone Continuations, ermöglicht das Senden von Daten an mehrere Empfänger
-internal class ContinuationStore<T> {
-    private var continuations: [String: CheckedContinuation<T, Error>] = [:]
-    private var streams: [String: AsyncStream<T>.Continuation] = [:]
-    private let lock = NSLock()
-    
-    func register(_ continuation: CheckedContinuation<T, Error>) -> String {
-        let id = UUID().uuidString
-        lock.lock()
-        defer { lock.unlock() }
-        continuations[id] = continuation
-        return id
+        context.write(self.wrapOutboundOut(.end(nil)), promise: nil)
+        context.flush()
     }
     
-    func remove(_ id: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        continuations.removeValue(forKey: id)
-        
-        if let stream = streams.removeValue(forKey: id) {
-            stream.finish()
-        }
+    func channelReadComplete(context: ChannelHandlerContext) {
+        context.flush()
     }
     
-    func yield(_ value: T, to target: YieldTarget) {
-        lock.lock()
-        defer { lock.unlock() }
-        
-        switch target {
-        case .all:
-            // An alle Continuations senden
-            for (_, continuation) in continuations {
-                continuation.resume(returning: value)
-            }
-            
-            // An alle Streams senden
-            for (_, stream) in streams {
-                stream.yield(value)
-            }
-            
-        case .id(let id):
-            // An eine spezifische Continuation senden
-            if let continuation = continuations[id] {
-                continuation.resume(returning: value)
-            }
-            
-            // An einen spezifischen Stream senden
-            streams[id]?.yield(value)
-        }
-    }
-    
-    func cancelAll(with error: Error) {
-        lock.lock()
-        defer { lock.unlock() }
-        
-        // Alle Continuations abbrechen
-        for (_, continuation) in continuations {
-            continuation.resume(throwing: error)
-        }
-        continuations.removeAll()
-        
-        // Alle Streams beenden
-        for (_, stream) in streams {
-            stream.finish()
-        }
-        streams.removeAll()
-    }
-    
-    func stream(for id: String) -> AsyncStream<T> {
-        return AsyncStream { continuation in
-            lock.lock()
-            streams[id] = continuation
-            lock.unlock()
-            
-            continuation.onTermination = { [weak self] _ in
-                self?.lock.lock()
-                self?.streams.removeValue(forKey: id)
-                self?.lock.unlock()
-            }
-        }
-    }
-    
-    enum YieldTarget {
-        case all
-        case id(String)
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        logger.error("Fehler in HTTP-Handler: \(error)")
+        context.close(promise: nil)
     }
 }

@@ -4,7 +4,7 @@ import Logging
 
 /// Ein MCP-Server für PDFs, der lokale PDF-Dokumente als Ressourcen bereitstellt
 public class EagleFlowServer {
-    /// Der zugrunde liegende MCP Server
+    /// Der zugrunde liegende MCP-Server
     private let server: Server
     
     /// Logger für Debugging
@@ -21,12 +21,20 @@ public class EagleFlowServer {
         return server.isRunning
     }
     
+    /// Name des Servers
+    public let name: String
+    
+    /// Version des Servers
+    public let version: String
+    
     /// Initialisiere einen neuen EagleFlowServer mit Konfiguration
     /// - Parameters:
     ///   - name: Servername
     ///   - version: Serverversion
     ///   - logger: Optional Logger für Debugging
     public init(name: String = "EagleFlowServer", version: String = "1.0.0", logger: Logger? = nil) {
+        self.name = name
+        self.version = version
         self.logger = logger ?? Logger(label: "com.eagleflow.server")
         
         // Server mit Resource-Capabilities erstellen
@@ -50,7 +58,7 @@ public class EagleFlowServer {
     /// - Parameter transport: Transport zur Kommunikation (z.B. HTTPServerTransport)
     /// - Returns: Keine Rückgabe, wirft einen Fehler bei Problemen
     public func start(transport: any Transport) async throws {
-        logger.info("Starte EagleFlow Server...")
+        logger.info("Starte EagleFlow Server (\(name) v\(version))...")
         
         try await server.start(transport: transport) { clientInfo, clientCapabilities in
             self.logger.info("Client verbunden: \(clientInfo.name) v\(clientInfo.version)")
@@ -88,17 +96,13 @@ public class EagleFlowServer {
         // Prüfe, ob die Datei existiert
         guard fileManager.fileExists(atPath: path) else {
             logger.error("PDF nicht gefunden: \(path)")
-            throw NSError(domain: "EagleFlowError", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "Die PDF-Datei wurde nicht gefunden: \(path)"
-            ])
+            throw EagleFlowError.fileNotFound(path: path)
         }
         
         // Prüfe, ob es tatsächlich ein PDF ist (einfache Validierung)
         guard path.lowercased().hasSuffix(".pdf") else {
             logger.error("Datei scheint kein PDF zu sein: \(path)")
-            throw NSError(domain: "EagleFlowError", code: 400, userInfo: [
-                NSLocalizedDescriptionKey: "Die Datei scheint kein PDF zu sein: \(path)"
-            ])
+            throw EagleFlowError.invalidFileType(path: path)
         }
         
         let resourceName = name ?? url.deletingPathExtension().lastPathComponent
@@ -171,9 +175,7 @@ public class EagleFlowServer {
         guard fileManager.fileExists(atPath: expandedPath, isDirectory: &isDirectory),
               isDirectory.boolValue else {
             logger.error("Verzeichnis nicht gefunden: \(expandedPath)")
-            throw NSError(domain: "EagleFlowError", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "Das Verzeichnis wurde nicht gefunden: \(expandedPath)"
-            ])
+            throw EagleFlowError.directoryNotFound(path: expandedPath)
         }
         
         // Durchlaufe das Verzeichnis und suche nach PDFs
@@ -215,6 +217,7 @@ public class EagleFlowServer {
                 return .init(resources: [], nextCursor: nil)
             }
             
+            self.logger.debug("Methode aufgerufen: resources/list")
             return .init(resources: self.resources, nextCursor: nil)
         }
         
@@ -225,9 +228,11 @@ public class EagleFlowServer {
             }
             
             let uri = params.uri
+            self.logger.debug("Methode aufgerufen: resources/read mit URI: \(uri)")
             
             // Prüfe, ob wir den Pfad für diese URI haben
             guard let filePath = self.resourcePathMap[uri] else {
+                self.logger.warning("Ressource nicht gefunden: \(uri)")
                 throw MCPError.invalidParams("Ressource nicht gefunden: \(uri)")
             }
             
@@ -253,9 +258,11 @@ public class EagleFlowServer {
             }
             
             let uri = params.uri
+            self.logger.debug("Methode aufgerufen: resources/subscribe mit URI: \(uri)")
             
             // Prüfe, ob die Ressource existiert
             guard self.resourcePathMap[uri] != nil else {
+                self.logger.warning("Ressource für Abonnement nicht gefunden: \(uri)")
                 throw MCPError.invalidParams("Ressource nicht gefunden: \(uri)")
             }
             
@@ -263,6 +270,27 @@ public class EagleFlowServer {
             
             // Erfolgreiche Anmeldung
             return .init()
+        }
+    }
+}
+
+/// Fehlertypen für EagleFlow
+public enum EagleFlowError: Error, LocalizedError {
+    case fileNotFound(path: String)
+    case invalidFileType(path: String)
+    case directoryNotFound(path: String)
+    case serverError(message: String)
+    
+    public var errorDescription: String? {
+        switch self {
+        case .fileNotFound(let path):
+            return "Die Datei wurde nicht gefunden: \(path)"
+        case .invalidFileType(let path):
+            return "Die Datei ist kein unterstützter Typ: \(path)"
+        case .directoryNotFound(let path):
+            return "Das Verzeichnis wurde nicht gefunden: \(path)"
+        case .serverError(let message):
+            return "Serverfehler: \(message)"
         }
     }
 }
