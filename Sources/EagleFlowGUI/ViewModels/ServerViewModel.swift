@@ -71,13 +71,21 @@ class ServerViewModel: ObservableObject {
     func removeDocument(_ document: PDFDocument) {
         if let server = server {
             Task {
-                await server.removeResource(uri: document.uri)
-                DispatchQueue.main.async {
-                    self.documents.removeAll { $0.id == document.id }
+                do {
+                    await server.removeResource(uri: document.uri)
+                    DispatchQueue.main.async {
+                        self.documents.removeAll { $0.id == document.id }
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.showError("Fehler beim Entfernen", message: "Dokument \(document.name) konnte nicht entfernt werden: \(error.localizedDescription)")
+                    }
                 }
             }
         } else {
-            documents.removeAll { $0.id == document.id }
+            DispatchQueue.main.async {
+                self.documents.removeAll { $0.id == document.id }
+            }
         }
     }
     
@@ -134,24 +142,47 @@ class ServerViewModel: ObservableObject {
     
     /// Startet den Server
     func startServer() {
-        guard !isServerRunning, server == nil else { return }
+        guard !isServerRunning, server == nil else { 
+            DispatchQueue.main.async {
+                self.showError("Server-Status", message: "Der Server läuft bereits oder ist im Startvorgang.")
+            }
+            return 
+        }
+        
+        // UI-Status aktualisieren
+        DispatchQueue.main.async {
+            self.logger.info("Server wird vorbereitet...")
+        }
         
         // Server erstellen
         let newServer = EagleFlowServer(name: "EagleFlowDocumentServer", version: "1.0.0", logger: logger)
         self.server = newServer
         
         // Dokumente hinzufügen
+        var addErrors: [String] = []
         for document in documents {
             if !document.path.isEmpty {
                 do {
                     let resource = try newServer.addPDFDocument(path: document.path)
                     // URI aktualisieren
-                    if let index = documents.firstIndex(where: { $0.id == document.id }) {
-                        documents[index].uri = resource.uri
+                    DispatchQueue.main.async {
+                        if let index = self.documents.firstIndex(where: { $0.id == document.id }) {
+                            self.documents[index].uri = resource.uri
+                        }
                     }
                 } catch {
-                    logger.error("Fehler beim Hinzufügen von \(document.name): \(error.localizedDescription)")
+                    let errorMsg = "Fehler beim Hinzufügen von \(document.name): \(error.localizedDescription)"
+                    logger.error("\(errorMsg)")
+                    addErrors.append(errorMsg)
                 }
+            }
+        }
+        
+        // Zeige Fehler beim Hinzufügen der Dokumente an, falls vorhanden
+        if !addErrors.isEmpty {
+            DispatchQueue.main.async {
+                self.showError("Fehler beim Hinzufügen von Dokumenten", 
+                               message: "Folgende Fehler sind aufgetreten:\n\(addErrors.joined(separator: "\n"))")
             }
         }
         
@@ -159,16 +190,21 @@ class ServerViewModel: ObservableObject {
         serverTask = Task {
             do {
                 let transport = HTTPServerTransport(host: host, port: port, path: ssePath, logger: logger)
+                logger.info("Server wird gestartet auf \(host):\(port)\(ssePath)...")
                 try await newServer.start(transport: transport)
                 
                 DispatchQueue.main.async {
                     self.isServerRunning = true
+                    self.logger.info("Server erfolgreich gestartet!")
                 }
             } catch {
                 DispatchQueue.main.async {
+                    self.serverTask = nil
                     self.server = nil
                     self.isServerRunning = false
-                    self.showError("Server-Fehler", message: "Der Server konnte nicht gestartet werden: \(error.localizedDescription)")
+                    self.logger.error("Serverfehler: \(error.localizedDescription)")
+                    self.showError("Server-Fehler", 
+                                  message: "Der Server konnte nicht gestartet werden: \(error.localizedDescription)\n\nBitte prüfen Sie, ob der Port \(self.port) bereits verwendet wird.")
                 }
             }
         }
@@ -176,16 +212,47 @@ class ServerViewModel: ObservableObject {
     
     /// Stoppt den Server
     func stopServer() {
-        guard isServerRunning, let server = server else { return }
-        
-        serverTask?.cancel()
-        
-        Task {
-            await server.stop()
-            
+        guard isServerRunning, let server = server else {
             DispatchQueue.main.async {
-                self.server = nil
-                self.isServerRunning = false
+                self.showError("Server-Status", message: "Der Server läuft nicht oder wurde bereits gestoppt.")
+            }
+            return
+        }
+        
+        // UI aktualisieren
+        DispatchQueue.main.async {
+            self.logger.info("Server wird gestoppt...")
+        }
+        
+        // Aktuelle Server-Task abbrechen
+        serverTask?.cancel()
+        serverTask = nil
+        
+        // Server in einem neuen Task stoppen
+        Task {
+            do {
+                await server.stop()
+                
+                DispatchQueue.main.async {
+                    self.server = nil
+                    self.isServerRunning = false
+                    self.logger.info("Server erfolgreich gestoppt")
+                    
+                    // URIs zurücksetzen, da der Server gestoppt wurde
+                    for index in self.documents.indices {
+                        self.documents[index].uri = ""
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.logger.error("Fehler beim Stoppen des Servers: \(error.localizedDescription)")
+                    self.showError("Stopp-Fehler", 
+                                 message: "Der Server konnte nicht ordnungsgemäß gestoppt werden: \(error.localizedDescription)")
+                    
+                    // Trotzdem Status zurücksetzen
+                    self.server = nil
+                    self.isServerRunning = false
+                }
             }
         }
     }
@@ -200,5 +267,24 @@ class ServerViewModel: ObservableObject {
             alert.addButton(withTitle: "OK")
             alert.runModal()
         }
+    }
+    
+    /// Cleanup-Methode
+    deinit {
+        if isServerRunning {
+            logger.warning("ViewModel wird zerstört, während der Server noch läuft. Server wird gestoppt.")
+            serverTask?.cancel()
+            
+            // Synchron stoppen, da wir uns in deinit befinden
+            if let server = server {
+                Task {
+                    await server.stop()
+                }
+            }
+        }
+        
+        // Ressourcen freigeben
+        server = nil
+        serverTask = nil
     }
 }

@@ -3,8 +3,25 @@ import Dispatch
 
 /// Hilfsfunktionen für die Signalbehandlung
 public enum SignalHandling {
+    /// Lock für Thread-sichere Zugriffe auf signalSources
+    private static let lock = NSLock()
+    
     /// Halten der Signal-Sources, um ihre Deallokation zu verhindern
-    private static var signalSources: [DispatchSourceSignal] = []
+    private static var _signalSources: [DispatchSourceSignal] = []
+    
+    /// Thread-sicherer Zugriff auf signalSources
+    private static var signalSources: [DispatchSourceSignal] {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _signalSources
+        }
+        set {
+            lock.lock()
+            _signalSources = newValue
+            lock.unlock()
+        }
+    }
     
     /// Richtet Signal-Handler für SIGINT und SIGTERM ein
     /// - Parameter handler: Der auszuführende Handler, wenn ein Signal empfangen wird
@@ -41,7 +58,9 @@ public enum SignalHandling {
         signal(SIGINT, SIG_DFL)
         signal(SIGTERM, SIG_DFL)
         
-        // Leere die Signal-Sources-Liste
-        signalSources.removeAll()
+        // Leere die Signal-Sources-Liste thread-sicher
+        lock.lock()
+        _signalSources.removeAll()
+        lock.unlock()
     }
 }
