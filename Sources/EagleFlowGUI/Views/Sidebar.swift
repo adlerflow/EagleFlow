@@ -3,10 +3,22 @@ import SwiftUI
 /// Seitenleiste mit PDF-Liste
 struct Sidebar: View {
     @ObservedObject var viewModel: ServerViewModel
+    @Binding var selection: NavigationPanel
     
     var body: some View {
-        List {
+        List(selection: $selection) {
+            Section("Server") {
+                NavigationLink(value: NavigationPanel.overview) {
+                    Label("Übersicht", systemImage: NavigationPanel.overview.icon)
+                }
+            }
+            
             Section("Dokumente") {
+                NavigationLink(value: NavigationPanel.documents) {
+                    Label("PDF-Sammlung", systemImage: NavigationPanel.documents.icon)
+                }
+                
+                // PDF-Dokumente anzeigen
                 ForEach(viewModel.documents) { document in
                     HStack {
                         Image(systemName: "doc.text")
@@ -26,16 +38,22 @@ struct Sidebar: View {
                         .foregroundColor(.secondary)
                         .italic()
                 }
+                
+                Button("PDF hinzufügen...") {
+                    viewModel.addPDFDocument()
+                }
+                .buttonStyle(.plain)
+                .padding(5)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(5)
             }
             
-            Button("PDF hinzufügen...") {
-                viewModel.addPDFDocument()
+            Section("Einstellungen") {
+                NavigationLink(value: NavigationPanel.settings) {
+                    Label("Einstellungen", systemImage: NavigationPanel.settings.icon)
+                }
             }
-            .buttonStyle(.plain)
-            .padding(5)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .background(Color.blue.opacity(0.1))
-            .cornerRadius(5)
         }
         .listStyle(.sidebar)
         .frame(minWidth: 220)

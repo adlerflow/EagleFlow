@@ -4,35 +4,29 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var viewModel = ServerViewModel()
     
+    // Ähnlich zu Food Truck: Statusverwaltung über StateObject
+    @State private var selection: NavigationPanel = .overview
+    @State private var path = NavigationPath()
+    
     var body: some View {
         NavigationSplitView {
-            Sidebar(viewModel: viewModel)
+            // Sidebar mit PDF-Liste
+            Sidebar(viewModel: viewModel, selection: $selection)
+                .navigationTitle("EagleFlow")
         } detail: {
-            if viewModel.isServerRunning {
-                ServerRunningView(viewModel: viewModel)
-            } else {
-                ServerSetupView(viewModel: viewModel)
-            }
-        }
-        .navigationTitle("EagleFlow PDF Server")
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button(action: {
-                    NSApp.sendAction(#selector(NSWindow.toggleToolbarShown(_:)), to: nil, from: nil)
-                }) {
-                    Image(systemName: "sidebar.left")
-                }
-            }
-            
-            if viewModel.isServerRunning {
-                ToolbarItem(placement: .automatic) {
-                    HStack {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 8, height: 8)
-                        Text("Server aktiv")
-                            .font(.caption)
+            NavigationStack(path: $path) {
+                // Detail-Bereich basierend auf Auswahl
+                switch selection {
+                case .overview:
+                    if viewModel.isServerRunning {
+                        ServerRunningView(viewModel: viewModel)
+                    } else {
+                        ServerSetupView(viewModel: viewModel)
                     }
+                case .documents:
+                    DocumentsView(viewModel: viewModel)
+                case .settings:
+                    SettingsView(viewModel: viewModel)
                 }
             }
         }
@@ -45,6 +39,23 @@ struct ContentView: View {
     private func setupNotifications() {
         NotificationCenter.default.addObserver(forName: .addPDF, object: nil, queue: .main) { _ in
             viewModel.addPDFDocument()
+        }
+    }
+}
+
+/// Navigationspanels für die Seitenleiste
+enum NavigationPanel: String, CaseIterable, Identifiable {
+    case overview = "Übersicht"
+    case documents = "Dokumente"
+    case settings = "Einstellungen"
+    
+    var id: String { self.rawValue }
+    
+    var icon: String {
+        switch self {
+        case .overview: return "server.rack"
+        case .documents: return "doc.text"
+        case .settings: return "gear"
         }
     }
 }
