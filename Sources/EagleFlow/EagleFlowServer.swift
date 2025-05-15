@@ -50,8 +50,7 @@ public class EagleFlowServer {
             logger: self.logger
         )
         
-        // Handler registrieren
-        self.registerHandlers()
+        // Handler werden beim Start des Servers registriert
     }
     
     /// Starte den Server mit dem angegebenen Transport
@@ -59,6 +58,9 @@ public class EagleFlowServer {
     /// - Returns: Keine Rückgabe, wirft einen Fehler bei Problemen
     public func start(transport: any Transport) async throws {
         logger.info("Starte EagleFlow Server (\(name) v\(version))...")
+        
+        // Registriere die Handler vor dem Start
+        await self.registerHandlers()
         
         try await server.start(transport: transport) { clientInfo, clientCapabilities in
             self.logger.info("Client verbunden: \(clientInfo.name) v\(clientInfo.version)")
@@ -151,7 +153,7 @@ public class EagleFlowServer {
             
             // Sende Benachrichtigung über Ressourcenänderung, wenn der Server läuft
             if server.isRunning {
-                try? await server.sendNotification(notification: ResourcesListChangedNotification.notification(.init()))
+                try? await server.sendNotification(ResourcesChangedNotification(.init()))
             }
             
             return true
@@ -210,9 +212,9 @@ public class EagleFlowServer {
     // MARK: - Private Implementierung
     
     /// Registriert alle Handler für den MCP-Server
-    private func registerHandlers() {
+    private func registerHandlers() async {
         // Handler für resources/list
-        server.withMethodHandler(ListResources.self) { [weak self] _ in
+        await server.withMethodHandler(ListResources.self) { [weak self] _ in
             guard let self = self else {
                 return .init(resources: [], nextCursor: nil)
             }
@@ -222,7 +224,7 @@ public class EagleFlowServer {
         }
         
         // Handler für resources/read
-        server.withMethodHandler(ReadResource.self) { [weak self] params in
+        await server.withMethodHandler(ReadResource.self) { [weak self] params in
             guard let self = self else {
                 throw MCPError.internalError("Server nicht verfügbar")
             }
@@ -242,8 +244,9 @@ public class EagleFlowServer {
                 
                 self.logger.info("PDF-Ressource gelesen: \(uri) (\(data.count) Bytes)")
                 
-                // Gib die PDF-Daten zurück
-                return .init(contents: [.init(uri: uri, mimeType: "application/pdf", blob: data)])
+                // Erstelle ResourceContent mit den PDF-Daten
+                let content = Resource.Content(uri: uri, data: data, type: "application/pdf")
+                return ReadResource.Result(contents: [content])
                 
             } catch {
                 self.logger.error("Fehler beim Lesen der PDF-Datei: \(error.localizedDescription)")
@@ -252,7 +255,7 @@ public class EagleFlowServer {
         }
         
         // Handler für resources/subscribe
-        server.withMethodHandler(SubscribeToResource.self) { [weak self] params in
+        await server.withMethodHandler(SubscribeResourceMethod.self) { [weak self] params in
             guard let self = self else {
                 throw MCPError.internalError("Server nicht verfügbar")
             }
@@ -275,7 +278,7 @@ public class EagleFlowServer {
 }
 
 /// Fehlertypen für EagleFlow
-public enum EagleFlowError: Error, LocalizedError {
+public enum EagleFlowError: Swift.Error, LocalizedError {
     case fileNotFound(path: String)
     case invalidFileType(path: String)
     case directoryNotFound(path: String)
